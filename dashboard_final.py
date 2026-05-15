@@ -1,3 +1,96 @@
+# ============================================================
+# LISTA DE EQUIPOS POR LIGA
+# ============================================================
+EQUIPOS_PREMIER_LEAGUE = [
+    "Arsenal", "Aston Villa", "Bournemouth", "Brentford", "Brighton", 
+    "Chelsea", "Crystal Palace", "Everton", "Fulham", "Ipswich Town", 
+    "Leicester City", "Liverpool", "Manchester City", "Manchester United", 
+    "Newcastle United", "Nottingham Forest", "Southampton", "Tottenham", 
+    "West Ham United", "Wolves"
+]
+
+EQUIPOS_LA_LIGA = [
+    "Real Madrid", "Barcelona", "Atletico Madrid", "Sevilla", "Real Sociedad", 
+    "Villarreal", "Athletic Bilbao", "Real Betis", "Valencia", "Osasuna",
+    "Girona", "Getafe", "Celta Vigo", "Rayo Vallecano", "Mallorca"
+]
+
+EQUIPOS_CHAMPIONS = [
+    "Real Madrid", "Manchester City", "Bayern Munich", "Barcelona", 
+    "Liverpool", "Paris Saint-Germain", "Inter Milan", "Arsenal",
+    "Borussia Dortmund", "Atletico Madrid", "Napoli", "AC Milan"
+]
+
+EQUIPOS_POR_LIGA = {
+    "Premier League": EQUIPOS_PREMIER_LEAGUE,
+    "La Liga": EQUIPOS_LA_LIGA,
+    "Champions League": EQUIPOS_CHAMPIONS,
+    "Serie A": ["Inter Milan", "AC Milan", "Juventus", "Roma", "Napoli", "Lazio", "Atalanta"],
+    "Bundesliga": ["Bayern Munich", "Borussia Dortmund", "Bayer Leverkusen", "RB Leipzig"]
+}
+
+# ============================================================
+# SIDEBAR ACTUALIZADO
+# ============================================================
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/43/43101.png", width=80)
+    st.title("🎮 Centro de Control")
+    
+    # Selector de liga
+    liga_seleccionada = st.selectbox("🏆 Liga / Competición", list(EQUIPOS_POR_LIGA.keys()))
+    
+    # Obtener equipos de la liga seleccionada
+    equipos_disponibles = EQUIPOS_POR_LIGA[liga_seleccionada]
+    
+    st.divider()
+    
+    # Selectores de equipos
+    col1, col2 = st.columns(2)
+    with col1:
+        local_idx = 0
+        if "Manchester City" in equipos_disponibles:
+            local_idx = equipos_disponibles.index("Manchester City")
+        elif "Real Madrid" in equipos_disponibles:
+            local_idx = equipos_disponibles.index("Real Madrid")
+        local = st.selectbox("🏠 Equipo Local", equipos_disponibles, index=local_idx)
+    
+    with col2:
+        visitante_idx = 1 if len(equipos_disponibles) > 1 else 0
+        if "Liverpool" in equipos_disponibles:
+            visitante_idx = equipos_disponibles.index("Liverpool")
+        elif "Barcelona" in equipos_disponibles:
+            visitante_idx = equipos_disponibles.index("Barcelona")
+        visitante = st.selectbox("✈️ Equipo Visitante", equipos_disponibles, index=visitante_idx)
+    
+    # Validar que no sean el mismo equipo
+    if local == visitante:
+        st.error("⚠️ No puedes seleccionar el mismo equipo")
+        # Cambiar automáticamente el visitante
+        for equipo in equipos_disponibles:
+            if equipo != local:
+                visitante = equipo
+                break
+    
+    st.divider()
+    
+    if st.button("🔄 Analizar Partido", use_container_width=True):
+        st.rerun()
+    
+    st.divider()
+    
+    if API_KEY and API_KEY != "None":
+        st.success("✅ API conectada")
+    else:
+        st.warning("⚠️ API no configurada")
+
+# Con buscador (requiere streamlit >= 1.30)
+local = st.selectbox(
+    "🏠 Equipo Local", 
+    equipos_disponibles,
+    index=local_idx,
+    placeholder="Escribe para buscar..."
+)
+
 import streamlit as st
 import pandas as pd
 import numpy as np
