@@ -1,0 +1,27 @@
+# render.yaml
+services:
+  # Backend API
+  - type: web
+    name: ares-backend
+    runtime: python
+    rootDir: .
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 8000
+    envVars:
+      - key: DB_HOST
+        value: postgres.railway.internal
+      - key: DB_PASSWORD
+        sync: false
+      - key: API_FOOTBALL_KEY
+        sync: false
+
+  # Frontend Static
+  - type: static
+    name: ares-frontend
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    publishPath: dist
+    envVars:
+      - key: VITE_API_URL
+        value: https://ares-backend.onrender.com
+        
