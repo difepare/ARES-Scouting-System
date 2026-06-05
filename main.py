@@ -1,264 +1,194 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import psycopg2
+import os
+from dotenv import load_dotenv
+import logging
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+import os
 
-app = FastAPI()
+# Configurar logging para ver errores en producción
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
+load_dotenv()
+
+app = FastAPI(title="ARES API", description="Advanced Real-time Evaluation System")
+
+# Configurar CORS para producción y desarrollo
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "https://ares-football-analytics.onrender.com",
+        "https://ares-web.onrender.com"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 def get_db():
+    """Conexión a PostgreSQL usando variables de entorno de Render"""
+    database_url = os.getenv("DATABASE_URL")
+    
+    if database_url:
+        logger.info(f"Conectando a DB con DATABASE_URL (primeros 20 chars: {database_url[:20]}...)")
+        return psycopg2.connect(database_url)
+    
+    # Fallback para desarrollo local
+    logger.info("Conectando a DB local")
     return psycopg2.connect(
-        host="localhost",
-        database="ares_db",
-        user="postgres",
-        password="Sarita2017"
+        host=os.getenv("DB_HOST", "localhost"),
+        database=os.getenv("DB_NAME", "ares_db"),
+        user=os.getenv("DB_USER", "postgres"),
+        password=os.getenv("DB_PASSWORD", "Sarita2017")
     )
 
 # ==================================================
 # ENDPOINTS PRINCIPALES
 # ==================================================
 
-@app.get("/api/partidos_ares")
-def get_partidos_ares():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT m.id, t1.nombre as local, t2.nombre as visitante, m.fecha
-        FROM matches m
-        JOIN teams t1 ON m.local_id = t1.id
-        JOIN teams t2 ON m.visitante_id = t2.id
-        WHERE t1.liga IN ('Premier League', 'La Liga')
-          AND t2.liga IN ('Premier League', 'La Liga')
-        ORDER BY m.fecha
-        LIMIT 50
-    """)
-    partidos = cur.fetchall()
-    cur.close()
-    conn.close()
+@app.get("/")
+def root():
+    return {"message": "ARES API is running!", "version": "1.0", "status": "active"}
 
-    return [{
-        "id": p[0],
-        "local": p[1],
-        "visitante": p[2],
-        "fecha": p[3],
-        "estado": "Pendiente",
-        "prob_local": 40,
-        "prob_empate": 25,
-        "prob_visitante": 35,
-        "xG_local": 1.4,
-        "xG_visitante": 1.3
-    } for p in partidos]
-
-@app.get("/api/jugadores")
-def get_jugadores():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT p.nombre, t.nombre as equipo, ps.goles
-        FROM players p
-        JOIN teams t ON p.equipo_id = t.id
-        JOIN player_stats ps ON p.id = ps.jugador_id
-        ORDER BY ps.goles DESC
-        LIMIT 20
-    """)
-    data = cur.fetchall()
-    cur.close()
-    conn.close()
-    return [{"nombre": d[0], "equipo": d[1], "goles": d[2]} for d in data]
-
-@app.get("/api/ofertas")
-def get_ofertas():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT DISTINCT ON (p.nombre) p.nombre, teo.nombre as origen, ted.nombre as destino, tof.monto_oferta
-        FROM transfer_offers tof
-        JOIN players p ON tof.jugador_id = p.id
-        JOIN teams teo ON tof.equipo_origen_id = teo.id
-        JOIN teams ted ON tof.equipo_destino_id = ted.id
-        LIMIT 20
-    """)
-    data = cur.fetchall()
-    cur.close()
-    conn.close()
-    return [{"jugador": d[0], "origen": d[1], "destino": d[2], "monto": d[3]} for d in data]
+@app.get("/health")
+def health():
+    return {"status": "healthy"}
 
 @app.get("/api/talentos_v2")
 def get_talentos_v2():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT p.id, p.nombre, p.edad, p.posicion, p.nacionalidad, t.nombre as equipo,
-               ps.goles, ps.asistencias, ps.partidos_jugados, ps.minutos_totales
-        FROM players p
-        JOIN teams t ON p.equipo_id = t.id
-        JOIN player_stats ps ON p.id = ps.jugador_id
-        WHERE p.edad <= 22 AND ps.partidos_jugados > 5
-        ORDER BY (ps.goles + ps.asistencias) DESC
-        LIMIT 30
-    """)
-    jugadores = cur.fetchall()
-    cur.close()
-    conn.close()
+    """Lista de jóvenes talentos con índice ARES"""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT p.id, p.nombre, p.edad, p.posicion, p.nacionalidad, t.nombre as equipo,
+                   COALESCE(ps.goles, 0) as goles, 
+                   COALESCE(ps.asistencias, 0) as asistencias, 
+                   COALESCE(ps.partidos_jugados, 1) as partidos, 
+                   COALESCE(ps.minutos_totales, 0) as minutos
+            FROM players p
+            JOIN teams t ON p.equipo_id = t.id
+            LEFT JOIN player_stats ps ON p.id = ps.jugador_id
+            WHERE p.edad <= 22
+            ORDER BY (COALESCE(ps.goles, 0) + COALESCE(ps.asistencias, 0)) DESC
+            LIMIT 30
+        """)
+        jugadores = cur.fetchall()
+        cur.close()
+        conn.close()
 
-    talentos = []
-    for j in jugadores:
-        (id_jugador, nombre, edad, posicion, nacionalidad, equipo,
-         goles, asistencias, partidos, minutos) = j
-        
-        productividad = round((goles + asistencias) / partidos, 2) if partidos > 0 else 0
-        indice = round((goles + asistencias) + (minutos / 1000), 1)
-        indice = min(10, max(0, indice))
-        
-        nivel = "🌟 CRACK MUNDIAL" if indice >= 7 else ("📈 PROMESA DE ÉLITE" if indice >= 5 else "🔍 VALOR EN ALZA")
-        
-        talentos.append({
-            "id": id_jugador,
-            "nombre": nombre,
-            "edad": edad,
-            "posicion": posicion,
-            "nacionalidad": nacionalidad or "Desconocida",
-            "equipo": equipo,
-            "indice_talento": indice,
-            "nivel": nivel,
-            "recomendacion": "Seguimiento prioritario",
-            "valor_mercado": round(indice * 3, 1),
-            "estadisticas": {
-                "goles": goles,
-                "asistencias": asistencias,
-                "partidos": partidos,
-                "minutos": minutos,
-                "productividad": productividad
-            }
-        })
-    return talentos
+        talentos = []
+        for j in jugadores:
+            (id_jugador, nombre, edad, posicion, nacionalidad, equipo,
+             goles, asistencias, partidos, minutos) = j
+            
+            productividad = round((goles + asistencias) / partidos, 2) if partidos > 0 else 0
+            indice = round((goles + asistencias) + (minutos / 1000), 1)
+            indice = min(10, max(0, indice))
+            
+            nivel = "🌟 CRACK MUNDIAL" if indice >= 7 else ("📈 PROMESA DE ÉLITE" if indice >= 5 else "🔍 VALOR EN ALZA")
+            
+            talentos.append({
+                "id": id_jugador,
+                "nombre": nombre,
+                "edad": edad,
+                "posicion": posicion,
+                "nacionalidad": nacionalidad or "Desconocida",
+                "equipo": equipo,
+                "indice_talento": indice,
+                "nivel": nivel,
+                "recomendacion": "Seguimiento prioritario",
+                "valor_mercado": round(indice * 3, 1),
+                "estadisticas": {
+                    "goles": goles,
+                    "asistencias": asistencias,
+                    "partidos": partidos,
+                    "minutos": minutos,
+                    "productividad": productividad
+                }
+            })
+        return talentos
+    except Exception as e:
+        logger.error(f"Error en /api/talentos_v2: {str(e)}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/api/worldcup/predictions")
 def get_worldcup_predictions():
-    # ==============================================
-    # MUNDIAL USA 2026 - GRUPOS REALES (12 GRUPOS)
-    # Basado en el calendario oficial que me compartiste
-    # ==============================================
-    
+    """Mundial USA 2026 - Grupos completos"""
     partidos = []
     partido_id = 1
     
-    # GRUPO A
-    grupo_a = [
-        {"local": "🇲🇽 México", "visitante": "🇿🇦 Sudáfrica", "prob_local": 55, "prob_empate": 25, "prob_visitante": 20},
-        {"local": "🇰🇷 Corea del Sur", "visitante": "🇨🇿 Chequia", "prob_local": 45, "prob_empate": 30, "prob_visitante": 25},
-        {"local": "🇨🇿 Chequia", "visitante": "🇿🇦 Sudáfrica", "prob_local": 48, "prob_empate": 28, "prob_visitante": 24},
-        {"local": "🇲🇽 México", "visitante": "🇰🇷 Corea del Sur", "prob_local": 52, "prob_empate": 27, "prob_visitante": 21},
-    ]
-    
-    # GRUPO B
-    grupo_b = [
-        {"local": "🇨🇦 Canadá", "visitante": "🇧🇦 Bosnia y Herzegovina", "prob_local": 53, "prob_empate": 26, "prob_visitante": 21},
-        {"local": "🇶🇦 Qatar", "visitante": "🇨🇭 Suiza", "prob_local": 35, "prob_empate": 28, "prob_visitante": 37},
-        {"local": "🇨🇭 Suiza", "visitante": "🇧🇦 Bosnia y Herzegovina", "prob_local": 50, "prob_empate": 28, "prob_visitante": 22},
-        {"local": "🇨🇦 Canadá", "visitante": "🇶🇦 Qatar", "prob_local": 48, "prob_empate": 27, "prob_visitante": 25},
-    ]
-    
-    # GRUPO C
-    grupo_c = [
-        {"local": "🇧🇷 Brasil", "visitante": "🇲🇦 Marruecos", "prob_local": 58, "prob_empate": 24, "prob_visitante": 18},
-        {"local": "🇭🇹 Haití", "visitante": "🏴󠁧󠁢󠁳󠁣󠁴󠁿 Escocia", "prob_local": 30, "prob_empate": 28, "prob_visitante": 42},
-        {"local": "🏴󠁧󠁢󠁳󠁣󠁴󠁿 Escocia", "visitante": "🇲🇦 Marruecos", "prob_local": 40, "prob_empate": 30, "prob_visitante": 30},
-        {"local": "🇧🇷 Brasil", "visitante": "🇭🇹 Haití", "prob_local": 70, "prob_empate": 18, "prob_visitante": 12},
-    ]
-    
-    # GRUPO D
-    grupo_d = [
-        {"local": "🇺🇸 USA", "visitante": "🇵🇾 Paraguay", "prob_local": 55, "prob_empate": 26, "prob_visitante": 19},
-        {"local": "🇦🇺 Australia", "visitante": "🇹🇷 Turquía", "prob_local": 38, "prob_empate": 28, "prob_visitante": 34},
-        {"local": "🇺🇸 USA", "visitante": "🇦🇺 Australia", "prob_local": 56, "prob_empate": 25, "prob_visitante": 19},
-        {"local": "🇹🇷 Turquía", "visitante": "🇵🇾 Paraguay", "prob_local": 48, "prob_empate": 27, "prob_visitante": 25},
-    ]
-    
-    # GRUPO E
-    grupo_e = [
-        {"local": "🇨🇮 Costa de Marfil", "visitante": "🇪🇨 Ecuador", "prob_local": 42, "prob_empate": 30, "prob_visitante": 28},
-        {"local": "🇩🇪 Alemania", "visitante": "🇨🇼 Curazao", "prob_local": 72, "prob_empate": 18, "prob_visitante": 10},
-        {"local": "🇩🇪 Alemania", "visitante": "🇨🇮 Costa de Marfil", "prob_local": 58, "prob_empate": 24, "prob_visitante": 18},
-        {"local": "🇪🇨 Ecuador", "visitante": "🇨🇼 Curazao", "prob_local": 55, "prob_empate": 26, "prob_visitante": 19},
-    ]
-    
-    # GRUPO F
-    grupo_f = [
-        {"local": "🇳🇱 Países Bajos", "visitante": "🇯🇵 Japón", "prob_local": 54, "prob_empate": 26, "prob_visitante": 20},
-        {"local": "🇸🇪 Suecia", "visitante": "🇹🇳 Túnez", "prob_local": 48, "prob_empate": 28, "prob_visitante": 24},
-        {"local": "🇳🇱 Países Bajos", "visitante": "🇸🇪 Suecia", "prob_local": 50, "prob_empate": 27, "prob_visitante": 23},
-    ]
-    
-    # GRUPO G
-    grupo_g = [
-        {"local": "🇧🇪 Bélgica", "visitante": "🇪🇬 Egipto", "prob_local": 52, "prob_empate": 27, "prob_visitante": 21},
-        {"local": "🇮🇷 Irán", "visitante": "🇳🇿 Nueva Zelanda", "prob_local": 48, "prob_empate": 28, "prob_visitante": 24},
-    ]
-    
-    # GRUPO H
-    grupo_h = [
-        {"local": "🇪🇸 España", "visitante": "🇨🇻 Cabo Verde", "prob_local": 65, "prob_empate": 22, "prob_visitante": 13},
-        {"local": "🇸🇦 Arabia Saudita", "visitante": "🇺🇾 Uruguay", "prob_local": 30, "prob_empate": 28, "prob_visitante": 42},
-    ]
-    
-    # GRUPO I
-    grupo_i = [
-        {"local": "🇫🇷 Francia", "visitante": "🇸🇳 Senegal", "prob_local": 55, "prob_empate": 25, "prob_visitante": 20},
-        {"local": "🇮🇶 Irak", "visitante": "🇳🇴 Noruega", "prob_local": 32, "prob_empate": 28, "prob_visitante": 40},
-    ]
-    
-    # GRUPO J
-    grupo_j = [
-        {"local": "🇦🇷 Argentina", "visitante": "🇩🇿 Argelia", "prob_local": 58, "prob_empate": 24, "prob_visitante": 18},
-        {"local": "🇦🇹 Austria", "visitante": "🇯🇴 Jordania", "prob_local": 48, "prob_empate": 28, "prob_visitante": 24},
-    ]
-    
-    # GRUPO K
-    grupo_k = [
-        {"local": "🇵🇹 Portugal", "visitante": "🇨🇩 RD Congo", "prob_local": 56, "prob_empate": 25, "prob_visitante": 19},
-        {"local": "🇺🇿 Uzbekistán", "visitante": "🇨🇴 Colombia", "prob_local": 28, "prob_empate": 27, "prob_visitante": 45},
-    ]
-    
-    # GRUPO L
-    grupo_l = [
-        {"local": "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Inglaterra", "visitante": "🇭🇷 Croacia", "prob_local": 48, "prob_empate": 29, "prob_visitante": 23},
-        {"local": "🇬🇭 Ghana", "visitante": "🇵🇦 Panamá", "prob_local": 46, "prob_empate": 28, "prob_visitante": 26},
-    ]
-    
-    # Unir todos los grupos
     grupos = {
-        "🇦 Grupo A": grupo_a,
-        "🇧 Grupo B": grupo_b,
-        "🇨 Grupo C": grupo_c,
-        "🇩 Grupo D": grupo_d,
-        "🇪 Grupo E": grupo_e,
-        "🇫 Grupo F": grupo_f,
-        "🇬 Grupo G": grupo_g,
-        "🇭 Grupo H": grupo_h,
-        "🇮 Grupo I": grupo_i,
-        "🇯 Grupo J": grupo_j,
-        "🇰 Grupo K": grupo_k,
-        "🇱 Grupo L": grupo_l,
+        "🇦 Grupo A": [
+            {"local": "🇲🇽 México", "visitante": "🇿🇦 Sudáfrica", "prob_local": 55, "prob_empate": 25, "prob_visitante": 20},
+            {"local": "🇰🇷 Corea del Sur", "visitante": "🇨🇿 Chequia", "prob_local": 45, "prob_empate": 30, "prob_visitante": 25},
+            {"local": "🇨🇿 Chequia", "visitante": "🇿🇦 Sudáfrica", "prob_local": 48, "prob_empate": 28, "prob_visitante": 24},
+            {"local": "🇲🇽 México", "visitante": "🇰🇷 Corea del Sur", "prob_local": 52, "prob_empate": 27, "prob_visitante": 21},
+        ],
+        "🇧 Grupo B": [
+            {"local": "🇨🇦 Canadá", "visitante": "🇧🇦 Bosnia", "prob_local": 53, "prob_empate": 26, "prob_visitante": 21},
+            {"local": "🇶🇦 Qatar", "visitante": "🇨🇭 Suiza", "prob_local": 35, "prob_empate": 28, "prob_visitante": 37},
+            {"local": "🇨🇭 Suiza", "visitante": "🇧🇦 Bosnia", "prob_local": 50, "prob_empate": 28, "prob_visitante": 22},
+            {"local": "🇨🇦 Canadá", "visitante": "🇶🇦 Qatar", "prob_local": 48, "prob_empate": 27, "prob_visitante": 25},
+        ],
+        "🇨 Grupo C": [
+            {"local": "🇧🇷 Brasil", "visitante": "🇲🇦 Marruecos", "prob_local": 58, "prob_empate": 24, "prob_visitante": 18},
+            {"local": "🇭🇹 Haití", "visitante": "🏴󠁧󠁢󠁳󠁣󠁴󠁿 Escocia", "prob_local": 30, "prob_empate": 28, "prob_visitante": 42},
+            {"local": "🏴󠁧󠁢󠁳󠁣󠁴󠁿 Escocia", "visitante": "🇲🇦 Marruecos", "prob_local": 40, "prob_empate": 30, "prob_visitante": 30},
+            {"local": "🇧🇷 Brasil", "visitante": "🇭🇹 Haití", "prob_local": 70, "prob_empate": 18, "prob_visitante": 12},
+        ],
+        "🇩 Grupo D": [
+            {"local": "🇺🇸 USA", "visitante": "🇵🇾 Paraguay", "prob_local": 55, "prob_empate": 26, "prob_visitante": 19},
+            {"local": "🇦🇺 Australia", "visitante": "🇹🇷 Turquía", "prob_local": 38, "prob_empate": 28, "prob_visitante": 34},
+            {"local": "🇺🇸 USA", "visitante": "🇦🇺 Australia", "prob_local": 56, "prob_empate": 25, "prob_visitante": 19},
+            {"local": "🇹🇷 Turquía", "visitante": "🇵🇾 Paraguay", "prob_local": 48, "prob_empate": 27, "prob_visitante": 25},
+        ],
+        "🇪 Grupo E": [
+            {"local": "🇨🇮 Costa de Marfil", "visitante": "🇪🇨 Ecuador", "prob_local": 42, "prob_empate": 30, "prob_visitante": 28},
+            {"local": "🇩🇪 Alemania", "visitante": "🇨🇼 Curazao", "prob_local": 72, "prob_empate": 18, "prob_visitante": 10},
+            {"local": "🇩🇪 Alemania", "visitante": "🇨🇮 Costa de Marfil", "prob_local": 58, "prob_empate": 24, "prob_visitante": 18},
+            {"local": "🇪🇨 Ecuador", "visitante": "🇨🇼 Curazao", "prob_local": 55, "prob_empate": 26, "prob_visitante": 19},
+        ],
+        "🇫 Grupo F": [
+            {"local": "🇳🇱 Países Bajos", "visitante": "🇯🇵 Japón", "prob_local": 54, "prob_empate": 26, "prob_visitante": 20},
+            {"local": "🇸🇪 Suecia", "visitante": "🇹🇳 Túnez", "prob_local": 48, "prob_empate": 28, "prob_visitante": 24},
+            {"local": "🇳🇱 Países Bajos", "visitante": "🇸🇪 Suecia", "prob_local": 50, "prob_empate": 27, "prob_visitante": 23},
+        ],
+        "🇬 Grupo G": [
+            {"local": "🇧🇪 Bélgica", "visitante": "🇪🇬 Egipto", "prob_local": 52, "prob_empate": 27, "prob_visitante": 21},
+            {"local": "🇮🇷 Irán", "visitante": "🇳🇿 Nueva Zelanda", "prob_local": 48, "prob_empate": 28, "prob_visitante": 24},
+        ],
+        "🇭 Grupo H": [
+            {"local": "🇪🇸 España", "visitante": "🇨🇻 Cabo Verde", "prob_local": 65, "prob_empate": 22, "prob_visitante": 13},
+            {"local": "🇸🇦 Arabia Saudita", "visitante": "🇺🇾 Uruguay", "prob_local": 30, "prob_empate": 28, "prob_visitante": 42},
+        ],
+        "🇮 Grupo I": [
+            {"local": "🇫🇷 Francia", "visitante": "🇸🇳 Senegal", "prob_local": 55, "prob_empate": 25, "prob_visitante": 20},
+            {"local": "🇮🇶 Irak", "visitante": "🇳🇴 Noruega", "prob_local": 32, "prob_empate": 28, "prob_visitante": 40},
+        ],
+        "🇯 Grupo J": [
+            {"local": "🇦🇷 Argentina", "visitante": "🇩🇿 Argelia", "prob_local": 58, "prob_empate": 24, "prob_visitante": 18},
+            {"local": "🇦🇹 Austria", "visitante": "🇯🇴 Jordania", "prob_local": 48, "prob_empate": 28, "prob_visitante": 24},
+        ],
+        "🇰 Grupo K": [
+            {"local": "🇵🇹 Portugal", "visitante": "🇨🇩 RD Congo", "prob_local": 56, "prob_empate": 25, "prob_visitante": 19},
+            {"local": "🇺🇿 Uzbekistán", "visitante": "🇨🇴 Colombia", "prob_local": 28, "prob_empate": 27, "prob_visitante": 45},
+        ],
+        "🇱 Grupo L": [
+            {"local": "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Inglaterra", "visitante": "🇭🇷 Croacia", "prob_local": 48, "prob_empate": 29, "prob_visitante": 23},
+            {"local": "🇬🇭 Ghana", "visitante": "🇵🇦 Panamá", "prob_local": 46, "prob_empate": 28, "prob_visitante": 26},
+        ],
     }
     
-    # Convertir a lista de partidos con ID único
     for grupo, matches in grupos.items():
         for match in matches:
-            # Determinar favorito para la recomendación
-            if match["prob_local"] > match["prob_visitante"]:
-                favorito = match["local"]
-            elif match["prob_visitante"] > match["prob_local"]:
-                favorito = match["visitante"]
-            else:
-                favorito = "Equilibrado"
-            
+            favorito = match["local"] if match["prob_local"] > match["prob_visitante"] else match["visitante"]
             partidos.append({
                 "id": partido_id,
                 "grupo": grupo,
@@ -267,227 +197,22 @@ def get_worldcup_predictions():
                 "prob_local": match["prob_local"],
                 "prob_empate": match["prob_empate"],
                 "prob_visitante": match["prob_visitante"],
-                "recomendacion": f"🔮 ARES predice: {favorito} {'favorito' if favorito != 'Equilibrado' else 'partido muy parejo'}"
+                "recomendacion": f"🔮 ARES predice: {favorito} favorito"
             })
             partido_id += 1
     
     return partidos
+
 @app.get("/api/knockout/predictions")
 def get_knockout_predictions():
     return [
-        {
-            "id": 101,
-            "ronda": "Octavos",
-            "local": "🇧🇷 Brasil",
-            "visitante": "🇨🇴 Colombia",
-            "prob_local": 55,
-            "prob_visitante": 45,
-            "ganador_predicho": "🇧🇷 Brasil",
-            "fecha": "2026-07-01"
-        },
-        {
-            "id": 102,
-            "ronda": "Octavos",
-            "local": "🇦🇷 Argentina",
-            "visitante": "🇺🇾 Uruguay",
-            "prob_local": 52,
-            "prob_visitante": 48,
-            "ganador_predicho": "🇦🇷 Argentina",
-            "fecha": "2026-07-02"
-        },
-        {
-            "id": 103,
-            "ronda": "Octavos",
-            "local": "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Inglaterra",
-            "visitante": "🇳🇱 Países Bajos",
-            "prob_local": 48,
-            "prob_visitante": 52,
-            "ganador_predicho": "🇳🇱 Países Bajos",
-            "fecha": "2026-07-03"
-        },
-        {
-            "id": 104,
-            "ronda": "Octavos",
-            "local": "🇫🇷 Francia",
-            "visitante": "🇵🇹 Portugal",
-            "prob_local": 50,
-            "prob_visitante": 50,
-            "ganador_predicho": "🇫🇷 Francia",
-            "fecha": "2026-07-04"
-        },
-        {
-            "id": 201,
-            "ronda": "Cuartos",
-            "local": "🇧🇷 Brasil",
-            "visitante": "🇦🇷 Argentina",
-            "prob_local": 48,
-            "prob_visitante": 52,
-            "ganador_predicho": "🇦🇷 Argentina",
-            "fecha": "2026-07-08"
-        },
-        {
-            "id": 202,
-            "ronda": "Cuartos",
-            "local": "🇫🇷 Francia",
-            "visitante": "🇳🇱 Países Bajos",
-            "prob_local": 53,
-            "prob_visitante": 47,
-            "ganador_predicho": "🇫🇷 Francia",
-            "fecha": "2026-07-09"
-        },
-        {
-            "id": 301,
-            "ronda": "Semis",
-            "local": "🇦🇷 Argentina",
-            "visitante": "🇫🇷 Francia",
-            "prob_local": 47,
-            "prob_visitante": 53,
-            "ganador_predicho": "🇫🇷 Francia",
-            "fecha": "2026-07-13"
-        },
-        {
-            "id": 302,
-            "ronda": "Semis",
-            "local": "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Inglaterra",
-            "visitante": "🇪🇸 España",
-            "prob_local": 45,
-            "prob_visitante": 55,
-            "ganador_predicho": "🇪🇸 España",
-            "fecha": "2026-07-14"
-        },
-        {
-            "id": 401,
-            "ronda": "Final",
-            "local": "🇫🇷 Francia",
-            "visitante": "🇪🇸 España",
-            "prob_local": 51,
-            "prob_visitante": 49,
-            "ganador_predicho": "🇫🇷 Francia",
-            "fecha": "2026-07-19"
-        },
-        {
-            "id": 402,
-            "ronda": "Tercer Lugar",
-            "local": "🇦🇷 Argentina",
-            "visitante": "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Inglaterra",
-            "prob_local": 50,
-            "prob_visitante": 50,
-            "ganador_predicho": "🇦🇷 Argentina",
-            "fecha": "2026-07-18"
-        }
+        {"id": 101, "ronda": "Octavos", "local": "🇧🇷 Brasil", "visitante": "🇨🇴 Colombia", "prob_local": 55, "prob_visitante": 45, "ganador_predicho": "🇧🇷 Brasil", "fecha": "2026-07-01"},
+        {"id": 102, "ronda": "Octavos", "local": "🇦🇷 Argentina", "visitante": "🇺🇾 Uruguay", "prob_local": 52, "prob_visitante": 48, "ganador_predicho": "🇦🇷 Argentina", "fecha": "2026-07-02"},
+        {"id": 103, "ronda": "Cuartos", "local": "🇧🇷 Brasil", "visitante": "🇦🇷 Argentina", "prob_local": 48, "prob_visitante": 52, "ganador_predicho": "🇦🇷 Argentina", "fecha": "2026-07-08"},
+        {"id": 104, "ronda": "Semis", "local": "🇦🇷 Argentina", "visitante": "🇫🇷 Francia", "prob_local": 47, "prob_visitante": 53, "ganador_predicho": "🇫🇷 Francia", "fecha": "2026-07-13"},
+        {"id": 105, "ronda": "Final", "local": "🇫🇷 Francia", "visitante": "🇪🇸 España", "prob_local": 51, "prob_visitante": 49, "ganador_predicho": "🇫🇷 Francia", "fecha": "2026-07-19"},
     ]
 
-@app.get("/api/ligas/{nombre}")
-def get_partidos_por_liga(nombre: str):
-    # Mapear nombre de liga (solo las que funcionan)
-    ligas_validas = {
-        "bundesliga": "Bundesliga",
-        "champions": "Champions League",
-        "seriea": "Serie A",
-        "ligue1": "Ligue 1"
-    }
-    
-    if nombre not in ligas_validas:
-        return {"error": "Liga no válida"}
-    
-    liga_bd = ligas_validas[nombre]
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT m.id, t1.nombre as local, t2.nombre as visitante, m.fecha
-        FROM matches m
-        JOIN teams t1 ON m.local_id = t1.id
-        JOIN teams t2 ON m.visitante_id = t2.id
-        WHERE t1.liga = %s AND t2.liga = %s
-        ORDER BY m.fecha
-        LIMIT 50
-    """, (liga_bd, liga_bd))
-    partidos = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    return [{
-        "id": p[0],
-        "local": p[1],
-        "visitante": p[2],
-        "fecha": p[3],
-        "estado": "Pendiente",
-        "prob_local": 40,
-        "prob_empate": 30,
-        "prob_visitante": 30,
-        "xG_local": 1.4,
-        "xG_visitante": 1.3
-    } for p in partidos]
-@app.get("/api/talento/{jugador_id}")
-def get_talento_detalle(jugador_id: int):
-    conn = get_db()
-    cur = conn.cursor()
-    
-    # Obtener datos del jugador
-    cur.execute("""
-        SELECT p.id, p.nombre, p.edad, p.posicion, p.nacionalidad, 
-               t.nombre as equipo, ps.goles, ps.asistencias, ps.partidos_jugados, ps.minutos_totales
-        FROM players p
-        JOIN teams t ON p.equipo_id = t.id
-        JOIN player_stats ps ON p.id = ps.jugador_id
-        WHERE p.id = %s
-    """, (jugador_id,))
-    jugador = cur.fetchone()
-    
-    if not jugador:
-        return {"error": "Jugador no encontrado"}
-    
-    # Obtener evolución por temporada (simulada por ahora)
-    cur.execute("""
-        SELECT temporada, goles, asistencias, partidos_jugados
-        FROM player_season_stats
-        WHERE jugador_id = %s
-        ORDER BY temporada
-    """, (jugador_id,))
-    evolucion_db = cur.fetchall()
-    
-    cur.close()
-    conn.close()
-    
-    # Si no hay evolución real, crear datos simulados para demostración
-    if not evolucion_db:
-        evolucion = [
-            {"temporada": "2023", "partidos": 18, "goles": 4, "asistencias": 2, "productividad": 0.33, "indice": 6.2},
-            {"temporada": "2024", "partidos": 28, "goles": 8, "asistencias": 4, "productividad": 0.43, "indice": 7.1},
-            {"temporada": "2025", "partidos": 30, "goles": 11, "asistencias": 5, "productividad": 0.53, "indice": 8.0}
-        ]
-    else:
-        evolucion = []
-        for e in evolucion_db:
-            productividad = round((e[1] + e[2]) / e[3], 2) if e[3] > 0 else 0
-            indice = round(e[1] + e[2] + (e[3] * 0.1), 1)
-            evolucion.append({
-                "temporada": e[0],
-                "partidos": e[3],
-                "goles": e[1],
-                "asistencias": e[2],
-                "productividad": productividad,
-                "indice": indice
-            })
-    
-    id_jugador, nombre, edad, posicion, nacionalidad, equipo, goles, asistencias, partidos, minutos = jugador
-    
-    productividad_actual = round((goles + asistencias) / partidos, 2) if partidos > 0 else 0
-    indice_actual = round(goles + asistencias + (minutos / 1000), 1)
-    proyeccion = round(indice_actual * 1.3, 1)
-    
-    return {
-        "id": id_jugador,
-        "nombre": nombre,
-        "edad": edad,
-        "posicion": posicion,
-        "nacionalidad": nacionalidad or "Desconocida",
-        "equipo": equipo,
-        "indice_actual": min(10, indice_actual),
-        "productividad_actual": productividad_actual,
-        "proyeccion": min(10, proyeccion),
-        "evolucion": evolucion
-    }
 @app.get("/api/ligas/{nombre}")
 def get_partidos_por_liga(nombre: str):
     ligas_validas = {
@@ -500,79 +225,76 @@ def get_partidos_por_liga(nombre: str):
     if nombre not in ligas_validas:
         return {"error": "Liga no válida"}
     
-    liga_bd = ligas_validas[nombre]
-    conn = get_db()
-    cur = conn.cursor()
-    
-    # Ahora incluyendo predicciones reales
-    cur.execute("""
-        SELECT m.id, t1.nombre as local, t2.nombre as visitante, m.fecha,
-               COALESCE(p.prob_local, 40) as prob_local,
-               COALESCE(p.prob_empate, 30) as prob_empate,
-               COALESCE(p.prob_visitante, 30) as prob_visitante,
-               COALESCE(p.xG_local, 1.4) as xG_local,
-               COALESCE(p.xG_visitante, 1.3) as xG_visitante
-        FROM matches m
-        JOIN teams t1 ON m.local_id = t1.id
-        JOIN teams t2 ON m.visitante_id = t2.id
-        LEFT JOIN predictions p ON m.id = p.partido_id
-        WHERE t1.liga = %s AND t2.liga = %s
-        ORDER BY m.fecha
-        LIMIT 50
-    """, (liga_bd, liga_bd))
-    
-    partidos = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    return [{
-        "id": p[0],
-        "local": p[1],
-        "visitante": p[2],
-        "fecha": p[3],
-        "estado": "Pendiente",
-        "prob_local": p[4] or 40,
-        "prob_empate": p[5] or 30,
-        "prob_visitante": p[6] or 30,
-        "xG_local": p[7] or 1.4,
-        "xG_visitante": p[8] or 1.3
-    } for p in partidos]
-@app.get("/api/worldcup/predictions")
-def get_worldcup_predictions():
-    # Datos de ejemplo para el Mundial 2026
+    # Por ahora devolvemos datos de ejemplo mientras la BD se llena
     return [
-        {"id": 1, "local": "Brasil", "visitante": "Francia", "prob_local": 48, "prob_empate": 28, "prob_visitante": 24, "recomendacion": "Brasil favorito por historia"},
-        {"id": 2, "local": "Argentina", "visitante": "Alemania", "prob_local": 45, "prob_empate": 30, "prob_visitante": 25, "recomendacion": "Partido muy parejo"},
+        {"id": 1, "local": "Bayern Munich", "visitante": "Borussia Dortmund", "fecha": "2025-12-15", "estado": "Pendiente", "prob_local": 55, "prob_empate": 25, "prob_visitante": 20, "xG_local": 2.1, "xG_visitante": 1.4},
+        {"id": 2, "local": "Bayer Leverkusen", "visitante": "RB Leipzig", "fecha": "2025-12-16", "estado": "Pendiente", "prob_local": 48, "prob_empate": 27, "prob_visitante": 25, "xG_local": 1.8, "xG_visitante": 1.6},
     ]
 
-@app.get("/api/knockout/predictions")
-def get_knockout_predictions():
+@app.get("/api/jugadores")
+def get_jugadores():
     return [
-        {"id": 101, "ronda": "Octavos", "local": "Brasil", "visitante": "Portugal", "prob_local": 52, "prob_visitante": 48, "ganador_predicho": "Brasil", "fecha": "2026-07-01"},
-        {"id": 102, "ronda": "Cuartos", "local": "Argentina", "visitante": "Inglaterra", "prob_local": 48, "prob_visitante": 52, "ganador_predicho": "Inglaterra", "fecha": "2026-07-05"},
+        {"nombre": "Harry Kane", "equipo": "Bayern Munich", "goles": 18},
+        {"nombre": "Victor Osimhen", "equipo": "Napoli", "goles": 15},
+        {"nombre": "Kylian Mbappé", "equipo": "Real Madrid", "goles": 14},
+        {"nombre": "Erling Haaland", "equipo": "Manchester City", "goles": 13},
+        {"nombre": "Lautaro Martínez", "equipo": "Inter", "goles": 12},
     ]
+
+@app.get("/api/ofertas")
+def get_ofertas():
+    return [
+        {"jugador": "Endrick", "origen": "Palmeiras", "destino": "Real Madrid", "monto": 35000000},
+        {"jugador": "Lamine Yamal", "origen": "Barcelona", "destino": "Paris SG", "monto": 120000000},
+        {"jugador": "Alejandro Garnacho", "origen": "Manchester United", "destino": "Napoli", "monto": 45000000},
+    ]
+
+@app.get("/api/talento/{jugador_id}")
+def get_talento_detalle(jugador_id: int):
+    # Datos de ejemplo para demostración
+    jugadores_ejemplo = {
+        1: {"nombre": "Endrick", "edad": 18, "posicion": "Delantero", "nacionalidad": "Brasil", "equipo": "Real Madrid", "indice_actual": 8.4, "productividad_actual": 0.57, "proyeccion": 9.5},
+        2: {"nombre": "Lamine Yamal", "edad": 17, "posicion": "Extremo", "nacionalidad": "España", "equipo": "Barcelona", "indice_actual": 8.1, "productividad_actual": 0.52, "proyeccion": 9.2},
+        3: {"nombre": "Alejandro Garnacho", "edad": 20, "posicion": "Extremo", "nacionalidad": "Argentina", "equipo": "Manchester United", "indice_actual": 7.6, "productividad_actual": 0.48, "proyeccion": 8.9},
+    }
+    
+    if jugador_id in jugadores_ejemplo:
+        jugador = jugadores_ejemplo[jugador_id]
+        jugador["id"] = jugador_id
+        jugador["evolucion"] = [
+            {"temporada": "2023", "partidos": 18, "goles": 4, "asistencias": 2, "productividad": 0.33, "indice": 6.2},
+            {"temporada": "2024", "partidos": 28, "goles": 8, "asistencias": 4, "productividad": 0.43, "indice": 7.1},
+            {"temporada": "2025", "partidos": 30, "goles": 11, "asistencias": 5, "productividad": 0.53, "indice": 8.0}
+        ]
+        return jugador
+    
+    return {"error": "Jugador no encontrado"}
+
 @app.get("/api/worldcup/live_scores")
 def get_live_scores():
     return [
-        {
-            "id": 1,
-            "local": "🇺🇸 USA",
-            "visitante": "🇲🇽 México",
-            "goles_local": 2,
-            "goles_visitante": 1,
-            "minuto": "FT",
-            "estado": "Finalizado"
-        },
-        {
-            "id": 2,
-            "local": "🇧🇷 Brasil",
-            "visitante": "🇵🇹 Portugal",
-            "goles_local": 0,
-            "goles_visitante": 0,
-            "minuto": 67,
-            "estado": "En Vivo"
-        }
+        {"id": 1, "local": "🇺🇸 USA", "visitante": "🇲🇽 México", "goles_local": 2, "goles_visitante": 1, "minuto": "FT", "estado": "Finalizado"},
+        {"id": 2, "local": "🇧🇷 Brasil", "visitante": "🇵🇹 Portugal", "goles_local": 0, "goles_visitante": 0, "minuto": 67, "estado": "En Vivo"},
+        {"id": 3, "local": "🇫🇷 Francia", "visitante": "🇦🇷 Argentina", "goles_local": 1, "goles_visitante": 1, "minuto": 55, "estado": "En Vivo"},
     ]
+
+@app.get("/api/partidos_ares")
+def get_partidos_ares():
+    return [
+        {"id": 1, "local": "Real Madrid", "visitante": "Barcelona", "fecha": "2025-12-20", "estado": "Pendiente", "prob_local": 48, "prob_empate": 27, "prob_visitante": 25, "xG_local": 1.9, "xG_visitante": 1.8},
+        {"id": 2, "local": "Manchester City", "visitante": "Liverpool", "fecha": "2025-12-21", "estado": "Pendiente", "prob_local": 52, "prob_empate": 25, "prob_visitante": 23, "xG_local": 2.1, "xG_visitante": 1.7},
+    ]
+frontend_dist = os.path.join(os.path.dirname(__file__), "frontend", "dist")
+if os.path.exists(frontend_dist):
+    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
+    
+    @app.get("/{full_path:path}")
+    async def serve_react(full_path: str):
+        if full_path.startswith("api/"):
+            # Dejar que los endpoints API manejen esto
+            return JSONResponse(status_code=404, content={"error": "Not found"})
+        return FileResponse(os.path.join(frontend_dist, "index.html"))
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
